@@ -1,6 +1,3 @@
-"""
-"""
-
 from tinydb import Query
 from copy import deepcopy
 
