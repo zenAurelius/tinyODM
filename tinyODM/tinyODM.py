@@ -1,5 +1,12 @@
-from tinydb import Query
+"""
+"""
+from tinydb import TinyDB, Query
+from tinydb.storages import JSONStorage, MemoryStorage
 from copy import deepcopy
+from tinydb_serialization import SerializationMiddleware
+from tinydb_serialization.serializers import DateSerializer, DateTimeSerializer
+from tinydb_serialization import Serializer
+
 
 def _enumerates(elements):
     """
@@ -14,28 +21,32 @@ def _enumerates(elements):
     else:
         return enumerate(elements)
 
+
 def _reads(elements):
     """
     Reads a list or dict of elements
 
-    if the element is a string representing a FK: load the foreign object in place in the original list or dict.
-    if the element is a list or a dict: recursively call reads
+    if element is a string for a FK: load the foreign object in place in the original list or dict.
+    if element is a list or a dict: recursively call reads
     """
 
     for key, value in _enumerates(elements):
         if isinstance(value, str) and '|' in value:
             datas = value.split('|')
+            print(datas)
             if datas[0] in TinyModel.models:
                 elements[key] = TinyModel.models[datas[0]].get_id(datas[1])
         elif isinstance(value, (dict, list)):
             _reads(value)
 
+
 def _writes(elements):
     """
     Writes a list or dict of elements
 
-    if the element is a TinyModel: check if exist in db or insert it, replace it with the FK string (<class name>|id) 
-    if the element is a list or dict: recursively call writes
+    - if element is a TinyModel: check if exist in db or insert it
+      and replace it with the FK string (<class name>|id)
+    - if element is a list or dict: recursively call writes
     """
 
     for key, value in _enumerates(elements):
@@ -45,6 +56,22 @@ def _writes(elements):
         elif isinstance(value, (dict, list)):
             _writes(value)
 
+class TinyConnection:
+
+    def __init__(self, dbfile=None, storage=None):
+        stor = SerializationMiddleware(JSONStorage) if storage is None else storage
+        file = dbfile if dbfile is not None else 'db.json'
+        if stor != MemoryStorage:
+            stor.register_serializer(DateTimeSerializer(), 'Datetime')
+            stor.register_serializer(DateSerializer(), 'Date')
+            #stor.register_serializer(TinyModelSerializer(), 'TinyModel')
+            self.db = TinyDB(file, storage=stor)
+        else:
+            self.db = TinyDB(storage=stor)
+        
+
+    def register(self, clsModel, tableName):
+        clsModel.collection = self.db.table(tableName)
 
 class TinyModel:
     """Base Class for any model"""
@@ -55,6 +82,7 @@ class TinyModel:
     models = {}
 
     def __init__(self, **kwargs):
+        setattr(self, self.__class__.id_name, None)
         for key, value in kwargs.items():
             setattr(self, key, value)
 
@@ -68,6 +96,13 @@ class TinyModel:
         TinyModel.models[cls.__name__] = cls
 
     @classmethod
+    def instanciate(cls, doc):
+        _reads(doc)
+        n = cls(**doc)
+        setattr(n, cls.id_name, doc.doc_id)
+        return n
+
+    @classmethod
     def get_id(cls, id: str):
         """
         Get a instance of the Model object from the DB by ID
@@ -77,15 +112,21 @@ class TinyModel:
             - else return None
         """
 
-        doc = cls.collection.get(cls.query[cls.id_name] == id)
+        doc = cls.collection.get(doc_id=id)
         if doc:
-            _reads(doc)
-            return cls(**doc)
+            return cls.instanciate(doc)
         else:
             return None
-        
+
     @classmethod
-    def remove_id(cls, id : str) -> None:
+    def get_all(cls):
+        docs = cls.collection.all()
+        for i, d in enumerate(docs):
+            docs[i] = cls.instanciate(d)
+        return docs
+
+    @classmethod
+    def remove_id(cls, id: str) -> None:
         """
         Remove a document from the DB
 
@@ -95,12 +136,21 @@ class TinyModel:
         cls.collection.remove(cls.query[cls.id_name] == id)
 
     @classmethod
-    def exists_id(cls, id : str) -> bool:
+    def exists_id(cls, id: str) -> bool:
         """
         Indicates if document fo id 'id' exists in collection of 'cls'
         """
-        
-        return cls.collection.contains(cls.query[cls.id_name] == id)
+
+        return id != None and cls.collection.contains(doc_id=id)
+    
+    @classmethod
+    def search(cls, querie):
+        docs = cls.collection.search(querie)
+        print(docs)
+        for i, d in enumerate(docs):
+            docs[i] = cls.instanciate(d)
+        print(docs)
+        return docs
 
     def _id(self) -> str:
         """
@@ -111,7 +161,7 @@ class TinyModel:
 
     def remove(self):
         """
-        Remove the document in the collection 
+        Remove the document in the collection
         """
 
         self.remove_id(self._id())
@@ -122,9 +172,9 @@ class TinyModel:
         """
 
         tm = self.__class__.get_id(self._id())
-        if tm :
+        if tm:
             self.__dict__ = tm.__dict__
-        else :
+        else:
             self = None
 
     def exists(self):
@@ -140,7 +190,27 @@ class TinyModel:
         If object already exist in DB, do nothing
         for children, if doesn't exist in DB insert, replace them by the FK tag (cf. _writes)
         """
-        if self.exists() : return
+        if self.exists():
+            return
         data = deepcopy(self.__dict__)
+        del data[self.__class__.id_name]
         _writes(data)
-        return self.__class__.collection.insert(data)
+        setattr(self, self.__class__.id_name, self.__class__.collection.insert(data))
+        return self
+
+    def update(self, fields=None):
+        upd = {}
+        if fields:
+            upd = {f: self.__dict__[f] for f in fields}
+        print(upd)
+        self.__class__.collection.update(upd, doc_ids=[self._id()])
+
+class TinyModelSerializer(Serializer):
+    OBJ_CLASS = TinyModel  # The class this serializer handles
+
+    def encode(self, obj):
+        
+        return data
+
+    def decode(self, s):
+        return datetime.fromisoformat(s)
